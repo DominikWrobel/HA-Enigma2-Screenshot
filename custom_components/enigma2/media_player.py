@@ -1,5 +1,6 @@
 """Support for Enigma2 media players."""
 
+import asyncio
 import contextlib
 from http import HTTPStatus
 from logging import getLogger
@@ -17,6 +18,7 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import Enigma2ConfigEntry, Enigma2UpdateCoordinator
@@ -30,6 +32,7 @@ _LOGGER = getLogger(__name__)
 
 SCREENSHOT_PATH = "/grab?format=jpg&r=480"
 SCREENSHOT_TIMEOUT = ClientTimeout(total=10)
+SCREENSHOT_REFRESH_INTERVAL = 30
 
 
 async def async_setup_entry(
@@ -71,30 +74,110 @@ class Enigma2Device(CoordinatorEntity[Enigma2UpdateCoordinator], MediaPlayerEnti
 
         self._attr_device_info = coordinator.device_info
         self._screenshot_revision = 0
+        self._last_service_ref: str | None = None
+        self._cancel_screenshot_refresh = None
+        self._screenshot_cache_revision = -1
+        self._screenshot_cache: bytes | None = None
+        self._screenshot_content_type: str | None = None
+        self._screenshot_lock = asyncio.Lock()
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Initialize the image and register the screenshot refresh timer."""
+        await super().async_added_to_hass()
+        if not self.coordinator.data.in_standby:
+            self._last_service_ref = self.coordinator.data.currservice.serviceref
+            self._invalidate_screenshot()
+            self._schedule_screenshot_refresh()
+
+    @override
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel the screenshot timer when the entity is removed."""
+        self._cancel_screenshot_timer()
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _cancel_screenshot_timer(self) -> None:
+        """Cancel a pending screenshot refresh timer."""
+        if self._cancel_screenshot_refresh is not None:
+            self._cancel_screenshot_refresh()
+            self._cancel_screenshot_refresh = None
+
+    @callback
+    def _schedule_screenshot_refresh(self) -> None:
+        """Schedule the next screenshot revision exactly 30 seconds later."""
+        self._cancel_screenshot_timer()
+        if self.coordinator.data.in_standby:
+            return
+        self._cancel_screenshot_refresh = async_call_later(
+            self.hass, SCREENSHOT_REFRESH_INTERVAL, self._handle_screenshot_timer
+        )
+
+    @callback
+    def _handle_screenshot_timer(self, _now) -> None:
+        """Invalidate the screenshot every 30 seconds while the box is on."""
+        self._cancel_screenshot_refresh = None
+        if self.coordinator.data.in_standby:
+            return
+        self._invalidate_screenshot()
+        self.async_write_ha_state()
+        self._schedule_screenshot_refresh()
+
+    @callback
+    def _invalidate_screenshot(self) -> None:
+        """Create a new image revision and invalidate its in-memory cache."""
+        self._screenshot_revision += 1
+        self._attr_media_image_hash = str(self._screenshot_revision)
+        self._screenshot_cache_revision = -1
+        self._screenshot_cache = None
+        self._screenshot_content_type = None
 
     @override
     async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
-        """Fetch a fresh screenshot from OpenWebif."""
+        """Return the screenshot for the current image revision.
+
+        A revision is created only after a channel change or every 30 seconds.
+        The resulting image is cached in memory so multiple frontend requests for
+        the same revision do not cause additional /grab requests to OpenWebif.
+        """
         if self.coordinator.data.in_standby:
             return None, None
 
-        try:
-            async with self.coordinator.session.get(
-                SCREENSHOT_PATH, timeout=SCREENSHOT_TIMEOUT
-            ) as response:
-                if response.status != HTTPStatus.OK:
-                    _LOGGER.debug(
-                        "OpenWebif screenshot request failed with HTTP status %s",
-                        response.status,
-                    )
-                    return None, None
+        revision = self._screenshot_revision
+        if self._screenshot_cache_revision == revision:
+            return self._screenshot_cache, self._screenshot_content_type
 
-                content = await response.read()
-                content_type = response.headers.get("Content-Type", "image/jpeg")
-                return content, content_type.split(";", 1)[0]
-        except (ClientError, TimeoutError) as err:
-            _LOGGER.debug("Unable to retrieve OpenWebif screenshot: %s", err)
-            return None, None
+        async with self._screenshot_lock:
+            if self._screenshot_cache_revision == revision:
+                return self._screenshot_cache, self._screenshot_content_type
+
+            content: bytes | None = None
+            content_type: str | None = None
+            try:
+                async with self.coordinator.session.get(
+                    SCREENSHOT_PATH, timeout=SCREENSHOT_TIMEOUT
+                ) as response:
+                    if response.status == HTTPStatus.OK:
+                        content = await response.read()
+                        content_type = response.headers.get(
+                            "Content-Type", "image/jpeg"
+                        ).split(";", 1)[0]
+                    else:
+                        _LOGGER.debug(
+                            "OpenWebif screenshot request failed with HTTP status %s",
+                            response.status,
+                        )
+            except (ClientError, TimeoutError) as err:
+                _LOGGER.debug("Unable to retrieve OpenWebif screenshot: %s", err)
+
+            # Cache success as well as failure for this revision. This guarantees
+            # that OpenWebif is contacted at most once per screenshot revision.
+            if revision == self._screenshot_revision:
+                self._screenshot_cache_revision = revision
+                self._screenshot_cache = content
+                self._screenshot_content_type = content_type
+
+            return content, content_type
 
     @override
     async def async_turn_off(self) -> None:
@@ -208,14 +291,19 @@ class Enigma2Device(CoordinatorEntity[Enigma2UpdateCoordinator], MediaPlayerEnti
         self._attr_is_volume_muted = self.coordinator.data.muted
         self._attr_media_content_id = self.coordinator.data.currservice.serviceref
 
-        # Force the Home Assistant media-player proxy URL to change on every
-        # coordinator refresh. async_get_media_image() then retrieves a fresh
-        # screenshot, avoiding both Home Assistant and browser image caching.
+        service_ref = self.coordinator.data.currservice.serviceref
+
+        # Request a new screenshot immediately when the channel changes.
+        # Otherwise the timer below invalidates it exactly every 30 seconds.
         if self.coordinator.data.in_standby:
             self._attr_media_image_hash = None
-        else:
-            self._screenshot_revision += 1
-            self._attr_media_image_hash = str(self._screenshot_revision)
+            self._last_service_ref = None
+            self._cancel_screenshot_timer()
+        elif service_ref != self._last_service_ref:
+            self._last_service_ref = service_ref
+            self._invalidate_screenshot()
+            self._schedule_screenshot_refresh()
+
         self._attr_source = self.coordinator.data.currservice.station
         self._attr_source_list = self.coordinator.device.source_list
 
