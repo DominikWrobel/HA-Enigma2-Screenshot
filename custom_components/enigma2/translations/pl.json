@@ -1,0 +1,43 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Urządzenie jest już skonfigurowane",
+      "cannot_connect": "Nie udało się połączyć",
+      "invalid_auth": "Nieprawidłowe dane uwierzytelniające",
+      "unknown": "Nieoczekiwany błąd"
+    },
+    "error": {
+      "cannot_connect": "Nie udało się połączyć",
+      "invalid_auth": "Nieprawidłowe dane uwierzytelniające",
+      "unknown": "Nieoczekiwany błąd"
+    },
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "data": {
+          "host": "Host",
+          "password": "Hasło",
+          "port": "Port",
+          "ssl": "Użyj SSL",
+          "username": "Nazwa użytkownika",
+          "verify_ssl": "Weryfikuj certyfikat SSL"
+        },
+        "description": "Wprowadź dane połączenia z urządzeniem."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "deep_standby": "Wyłączaj do trybu Deep Standby",
+          "source_bouquet": "Bukiet używany jako źródło multimediów",
+          "use_channel_icon": "Pokazuj ikonę kanału jako obraz multimediów"
+        },
+        "data_description": {
+          "deep_standby": "Wyłącz urządzenie do trybu Deep Standby (pełne wyłączenie) zamiast zwykłego czuwania."
+        }
+      }
+    }
+  }
+}
