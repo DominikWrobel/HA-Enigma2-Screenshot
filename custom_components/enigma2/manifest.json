@@ -2,13 +2,13 @@
   "domain": "enigma2",
   "name": "Enigma2 (OpenWebif)",
   "codeowners": [
-    "@YOUR_GITHUB_USERNAME"
+    "@DominikWrobel"
   ],
   "config_flow": true,
   "documentation": "https://www.home-assistant.io/integrations/enigma2",
   "integration_type": "device",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/YOUR_GITHUB_USERNAME/ha-enigma2-screenshot/issues",
+  "issue_tracker": "https://github.com/DominikWrobel/ha-enigma2-screenshot/issues",
   "loggers": [
     "openwebif"
   ],
